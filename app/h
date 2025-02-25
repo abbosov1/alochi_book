@@ -1,5 +1,3 @@
-import logging
-
 from aiogram import Router, types, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -11,9 +9,8 @@ from aiogram.types import (
 from app import config, database, keyboards
 
 router = Router()
-logger = logging.getLogger(__name__)
 
-# Глобальный словарь для хранения ожидаемых заказов от админа
+# Глобальный словарь для хранения ожидаемых заказов от админа (если потребуется)
 admin_pending_orders = {}
 
 
@@ -31,13 +28,17 @@ async def start_command(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await state.clear()
     if await database.user_exists(user_id):
+        # Для рабочих и учителей (а также админа, если он зашёл как учитель) используем teacher_menu_keyboard
         if user_id in config.WORKER_IDS:
-            await message.answer("Siz allaqachon ro'yxatdan o'tgansiz.\nMenyu:",
+            await message.answer("Siz allaqachon ro'yxatdan o'tgansiz.",
                                  reply_markup=keyboards.worker_menu_keyboard())
+        elif user_id is config.ADMIN_ID:
+            await message.answer("Siz allaqachon ro'yxatdan o'tgansiz.")
         else:
-            await message.answer("Siz allaqachon ro'yxatdan o'tgansiz.\nMenyu:",
+            await message.answer("Siz allaqachon ro'yxatdan o'tgansiz.",
                                  reply_markup=keyboards.teacher_menu_keyboard())
         return
+
     await state.set_state(Registration.waiting_for_contact)
     await message.answer("Assalomu alaykum botga xush kelibsiz!\nTelefon raqamingizni yuboring",
                          reply_markup=keyboards.contact_keyboard())
@@ -58,8 +59,14 @@ async def name_handler(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     name = message.text
     await database.update_user(user_id, name=name)
-    await state.set_state(Registration.waiting_for_school)
-    await message.answer("Endi qaysi maktabda ishlashingizni kiriting")
+    # Для рабочих и учителей (включая админа, если зашёл как teacher) – переходим в следующий шаг регистрации
+    if user_id in config.WORKER_IDS:
+        await message.answer("Sizning ismingiz tasdiqlandi, endi qaysi tugma bosing "
+                             "va ma'lumotlaringizni o'z ichiga saqlashingiz mumkin.\nMenyu:",
+                             reply_markup=keyboards.worker_menu_keyboard())
+    else:
+        await state.set_state(Registration.waiting_for_school)
+        await message.answer("Endi qaysi maktabda ishlashingizni kiriting")
 
 
 @router.message(Registration.waiting_for_school)
@@ -100,7 +107,7 @@ class UpdateTeacherInfo(StatesGroup):
 @router.message(lambda message: message.text == "Ma'lumotlarni o'zgartirish")
 async def update_info_start(message: types.Message, state: FSMContext):
     await state.set_state(UpdateTeacherInfo.waiting_for_new_name)
-    await message.answer("Yangi ismingizni kiriting:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Ismingizni qaytadan kiriting:", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(UpdateTeacherInfo.waiting_for_new_name)
@@ -108,7 +115,7 @@ async def update_info_name(message: types.Message, state: FSMContext):
     new_name = message.text
     await state.update_data(new_name=new_name)
     await state.set_state(UpdateTeacherInfo.waiting_for_new_school)
-    await message.answer("Yangi maktabingizni kiriting:")
+    await message.answer("Maktabingizni qaytadan kiriting:")
 
 
 @router.message(UpdateTeacherInfo.waiting_for_new_school)
@@ -124,34 +131,33 @@ async def update_info_school(message: types.Message, state: FSMContext):
 
 @router.message(lambda message: message.text == "Biz bilan bog'lanish")
 async def contact_admin_handler(message: types.Message):
-    await message.answer(f"Admin bilan bog'lanish uchun: {config.ADMIN_PHONE}")
+    # Отправляем номер администратора, взятый из config.ADMIN_PHONE
+    await message.answer(f"Admin bilan bog'lanish uchun quyidagi raqamlarga murojaat qiling: \n{config.ADMIN_PHONE}")
 
 
 # ============================================================================
 # Оформление заказа книги (FSM)
 # ============================================================================
+# Один и тот же процесс используется для учителей и рабочих,
+# но в финальном подтверждении формируется разный текст.
 class OrderBook(StatesGroup):
-    waiting_for_category = State()
-    waiting_for_count = State()  # для обычных заказов
-    waiting_for_count_confirm = State()  # для обычных заказов
-    # Для комбинированного заказа "Ikkalasidanham"
-    waiting_for_count_student = State()  # количество для Student book
-    waiting_for_count_workbook = State()  # количество для Workbook
-    waiting_for_ikkalasidanham_confirm = State()  # подтверждение комбинированного заказа
-    waiting_for_school_input = State()
-    waiting_for_school_confirm = State()
-    waiting_for_final_confirm = State()
+    waiting_for_category = State()  # Выбор категории книги
+    waiting_for_count = State()  # Изменение количества через inline-клавиатуру
+    waiting_for_count_confirm = State()  # Подтверждение выбранного количества
+    waiting_for_school_input = State()  # Ввод нового названия/
+    waiting_for_school_confirm = State()  # Подтверждение использования зарегистрированного
+    waiting_for_final_confirm = State()  # Финальное подтверждение заказа
 
 
-# Заказ для учителей
+# Обработчик для учителей (кнопка "Kitobga buyurtma berish")
 @router.message(lambda message: message.text == "Kitobga buyurtma berish")
 async def teacher_order_book_start(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
+    # Если пользователь не рабочий, то считаем его учителем
     await state.set_state(OrderBook.waiting_for_category)
     reply_keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Student book"), KeyboardButton(text="Workbook")],
-            [KeyboardButton(text="Ikkalasidanham")]
+            [KeyboardButton(text="Ikkalasidan ham")]
         ],
         resize_keyboard=True,
         one_time_keyboard=True
@@ -159,7 +165,7 @@ async def teacher_order_book_start(message: types.Message, state: FSMContext):
     await message.answer("Iltimos, kitob turini tanlang:", reply_markup=reply_keyboard)
 
 
-# Заказ для рабочих
+# Обработчик для рабочих (кнопка "Buyurtma berish" из worker_menu)
 @router.message(lambda message: message.text == "Buyurtma berish" and message.from_user.id in config.WORKER_IDS)
 async def worker_order_book_start(message: types.Message, state: FSMContext):
     await state.set_state(OrderBook.waiting_for_category)
@@ -177,33 +183,37 @@ async def worker_order_book_start(message: types.Message, state: FSMContext):
 @router.message(OrderBook.waiting_for_category)
 async def order_book_category_chosen(message: types.Message, state: FSMContext):
     order_category = message.text
-    if order_category not in ["Student book", "Workbook", "Ikkalasidanham"]:
+    if order_category not in ["Student book", "Workbook", "Ikkalasidan ham"]:
         await message.answer("Noto'g'ri tanlov, iltimos, qaytadan tanlang.")
         return
-    if order_category in ["Student book", "Workbook"]:
-        await state.update_data(order_category=order_category, count=1)
-        await state.set_state(OrderBook.waiting_for_count)
-        if order_category == "Student book":
-            inline_kb = keyboards.order_count_keyboard()
-            photo = FSInputFile("images/Students_book.png")
-            await message.answer_photo(photo=photo, caption="Kitobning sonini belgilang. Hozirgi son: 1",
-                                       reply_markup=inline_kb)
-        else:
-            inline_kb = keyboards.order_count_keyboard()
-            photo = FSInputFile("images/Workbook.png")
-            await message.answer_photo(photo=photo, caption="Kitobning sonini belgilang. Hozirgi son: 1",
-                                       reply_markup=inline_kb)
-    else:
-        # Комбинированный заказ "Ikkalasidanham"
-        await state.update_data(order_category="Ikkalasidanham", student_count=1, workbook_count=0)
-        await state.set_state(OrderBook.waiting_for_count_student)
-        inline_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="-", callback_data="order:ikkalasidanham_student:decrease"),
-             types.InlineKeyboardButton(text="+", callback_data="order:ikkalasidanham_student:increase")],
-            [types.InlineKeyboardButton(text="Buyurtma berish", callback_data="order:ikkalasidanham_student:submit")]
-        ])
+
+    await state.update_data(order_category=order_category, count=1)
+    await state.set_state(OrderBook.waiting_for_count)
+
+    if order_category == "Student book":
+        inline_kb = keyboards.order_count_keyboard()
         photo = FSInputFile("images/Students_book.png")
-        await message.answer_photo(photo=photo, caption="Student Book (Ikkalasidanham): 1", reply_markup=inline_kb)
+        await message.answer_photo(
+            photo=photo,
+            caption="Kitobning sonini belgilang. Hozirgi son: 1",
+            reply_markup=inline_kb
+        )
+    elif order_category == "Workbook":
+        inline_kb = keyboards.order_count_keyboard()
+        photo = FSInputFile("images/Workbook.png")
+        await message.answer_photo(
+            photo=photo,
+            caption="Kitobning sonini belgilang. Hozirgi son: 1",
+            reply_markup=inline_kb
+        )
+    elif order_category == "Ikkalasidanham":
+        inline_kb = keyboards.order_count_keyboard()
+        photo = FSInputFile("images/Ikkalasidanham.png")
+        await message.answer_photo(
+            photo=photo,
+            caption="Kitobning sonini belgilang. Hozirgi son: 1",
+            reply_markup=inline_kb
+        )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("order:count:"))
@@ -235,7 +245,7 @@ async def order_count_callback(callback_query: types.CallbackQuery, state: FSMCo
         count = state_data.get("count", 1)
         confirm_kb = keyboards.order_confirm_keyboard()
         await callback_query.message.answer(
-            f"Siz bizning {state_data.get('order_category', 'kitob')} imizdan {count} buyurtma bermoqchimisiz?",
+            f"Siz bizning {state_data.get('order_category', 'kitob')} imizdan {count} dona buyurtma bermoqchimisiz?",
             reply_markup=confirm_kb
         )
         await callback_query.answer()
@@ -249,7 +259,7 @@ async def order_count_confirm_callback(callback_query: types.CallbackQuery, stat
         user_info = await database.get_user(user_id)
         school = None
         if user_info:
-            school = user_info[3]
+            school = user_info[3]  # (user_id, phone, name, school)
         if school:
             await state.set_state(OrderBook.waiting_for_school_confirm)
             school_confirm_kb = keyboards.school_confirm_keyboard()
@@ -263,147 +273,11 @@ async def order_count_confirm_callback(callback_query: types.CallbackQuery, stat
                 "Yaxshi, unday bo'lsa buyurtma bermoqchi bo'lgan maktabingizni kiriting!")
         await callback_query.answer()
     elif data == "order:count_confirm:no":
-        await callback_query.message.answer("Buyurtma bekor qilindi.", reply_markup=ReplyKeyboardRemove())
-        await state.clear()
-        await callback_query.answer()
-
-
-# --- Обработка комбинированного заказа: Student book часть ---
-@router.callback_query(lambda c: c.data and c.data.startswith("order:ikkalasidanham_student:"))
-async def order_ikkalasidanham_student_callback(callback_query: types.CallbackQuery, state: FSMContext):
-    data = callback_query.data
-    prefix = "order:ikkalasidanham_student:"
-    state_data = await state.get_data()
-    student_count = state_data.get("student_count", 1)
-    if data == f"{prefix}decrease":
-        if student_count > 1:
-            student_count -= 1
-        await state.update_data(student_count=student_count)
-        inline_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="-", callback_data=f"{prefix}decrease"),
-             types.InlineKeyboardButton(text="+", callback_data=f"{prefix}increase")],
-            [types.InlineKeyboardButton(text="Buyurtma berish", callback_data=f"{prefix}submit")]
-        ])
-        await callback_query.message.edit_caption(
-            caption=f"Student Book (Ikkalasidanham): {student_count}",
-            reply_markup=inline_kb
-        )
-        await callback_query.answer()
-    elif data == f"{prefix}increase":
-        student_count += 1
-        await state.update_data(student_count=student_count)
-        inline_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="-", callback_data=f"{prefix}decrease"),
-             types.InlineKeyboardButton(text="+", callback_data=f"{prefix}increase")],
-            [types.InlineKeyboardButton(text="Buyurtma berish", callback_data=f"{prefix}submit")]
-        ])
-        await callback_query.message.edit_caption(
-            caption=f"Student Book (Ikkalasidanham): {student_count}",
-            reply_markup=inline_kb
-        )
-        await callback_query.answer()
-    elif data == f"{prefix}submit":
-        # Удаляем сообщение с информацией о Student Book
-        await callback_query.message.delete()
-        # Переходим к ветке для Workbook
-        await state.set_state(OrderBook.waiting_for_count_workbook)
-        inline_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="-", callback_data="order:ikkalasidanham_workbook:decrease"),
-             types.InlineKeyboardButton(text="+", callback_data="order:ikkalasidanham_workbook:increase")],
-            [types.InlineKeyboardButton(text="Buyurtma berish", callback_data="order:ikkalasidanham_workbook:submit")]
-        ])
-        photo = FSInputFile("images/Workbook.png")
-        await callback_query.message.answer_photo(
-            photo=photo,
-            caption="Workbook (Ikkalasidanham): 0",
-            reply_markup=inline_kb
-        )
-        await callback_query.answer()
-
-
-# --- Обработка комбинированного заказа: Workbook часть ---
-@router.callback_query(lambda c: c.data and c.data.startswith("order:ikkalasidanham_workbook:"))
-async def order_ikkalasidanham_workbook_callback(callback_query: types.CallbackQuery, state: FSMContext):
-    data = callback_query.data
-    prefix = "order:ikkalasidanham_workbook:"
-    state_data = await state.get_data()
-    workbook_count = state_data.get("workbook_count", 0)
-    if data == f"{prefix}decrease":
-        if workbook_count > 0:
-            workbook_count -= 1
-        await state.update_data(workbook_count=workbook_count)
-        inline_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="-", callback_data=f"{prefix}decrease"),
-             types.InlineKeyboardButton(text="+", callback_data=f"{prefix}increase")],
-            [types.InlineKeyboardButton(text="Buyurtma berish", callback_data=f"{prefix}submit")]
-        ])
-        await callback_query.message.edit_caption(
-            caption=f"Workbook (Ikkalasidanham): {workbook_count}",
-            reply_markup=inline_kb
-        )
-        await callback_query.answer()
-    elif data == f"{prefix}increase":
-        workbook_count += 1
-        await state.update_data(workbook_count=workbook_count)
-        inline_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="-", callback_data=f"{prefix}decrease"),
-             types.InlineKeyboardButton(text="+", callback_data=f"{prefix}increase")],
-            [types.InlineKeyboardButton(text="Buyurtma berish", callback_data=f"{prefix}submit")]
-        ])
-        await callback_query.message.edit_caption(
-            caption=f"Workbook (Ikkalasidanham): {workbook_count}",
-            reply_markup=inline_kb
-        )
-        await callback_query.answer()
-    elif data == f"{prefix}submit":
-        # Удаляем сообщение с информацией о Workbook
-        await callback_query.message.delete()
-        # Переходим к финальному подтверждению комбинированного заказа
-        await state.set_state(OrderBook.waiting_for_ikkalasidanham_confirm)
-        state_data = await state.get_data()
-        student_count = state_data.get("student_count", 1)
-        workbook_count = state_data.get("workbook_count", 0)
-        combined_text = f"Student book: {student_count}, Workbook: {workbook_count}"
-        confirm_kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="Ha", callback_data="order:ikkalasidanham_confirm:yes"),
-             types.InlineKeyboardButton(text="Yo'q", callback_data="order:ikkalasidanham_confirm:no")]
-        ])
-        await callback_query.message.answer(
-            f"Siz quyidagi buyurtma bermoqchimisiz?\n{combined_text}",
-            reply_markup=confirm_kb
-        )
-        await callback_query.answer()
-
-
-# --- Обработка подтверждения комбинированного заказа ---
-@router.callback_query(lambda c: c.data and c.data.startswith("order:ikkalasidanham_confirm:"))
-async def order_ikkalasidanham_confirm_callback(callback_query: types.CallbackQuery, state: FSMContext):
-    data = callback_query.data
-    # Удаляем сообщение с inline-клавиатурой подтверждения
-    await callback_query.message.delete()
-    if data == "order:ikkalasidanham_confirm:yes":
-        user_id = callback_query.from_user.id
-        user_info = await database.get_user(user_id)
-        school = user_info[3] if user_info else None
-        if school:
-            await state.set_state(OrderBook.waiting_for_school_confirm)
-            school_confirm_kb = keyboards.school_confirm_keyboard()
-            await callback_query.message.answer(
-                f"Sizning ro'yxatdan o'tgan maktabingiz: {school}. Shu maktabga buyurtmani jo'natish kerakmi?",
-                reply_markup=school_confirm_kb
-            )
-        else:
-            await state.set_state(OrderBook.waiting_for_school_input)
-            await callback_query.message.answer(
-                "Yaxshi, unday bo'lsa, buyurtma bermoqchi bo'lgan maktabingizni kiriting!")
-        await callback_query.answer()
-    elif data == "order:ikkalasidanham_confirm:no":
         await callback_query.message.answer("Buyurtma bekor qilindi.", reply_markup=keyboards.teacher_menu_keyboard())
         await state.clear()
         await callback_query.answer()
 
 
-# Общая часть для SCHOOL и FINAL CONFIRM (для всех заказов)
 @router.message(OrderBook.waiting_for_school_input)
 async def order_school_input(message: types.Message, state: FSMContext):
     school = message.text
@@ -425,7 +299,7 @@ async def order_school_confirm_callback(callback_query: types.CallbackQuery, sta
         await callback_query.answer()
     elif data == "order:school_confirm:no":
         await state.set_state(OrderBook.waiting_for_school_input)
-        await callback_query.message.answer("Yaxshi, unday bo'lsa, buyurtma bermoqchi bo'lgan maktabingizni kiriting!")
+        await callback_query.message.answer("Yaxshi, unday bo'lsa buyurtma bermoqchi bo'lgan maktabingizni kiriting!")
         await callback_query.answer()
 
 
@@ -435,21 +309,17 @@ async def order_final_confirm_callback(callback_query: types.CallbackQuery, stat
     user_id = callback_query.from_user.id
     state_data = await state.get_data()
     order_category = state_data.get("order_category")
-    if order_category == "Ikkalasidanham":
-        student_count = state_data.get("student_count", 1)
-        workbook_count = state_data.get("workbook_count", 0)
-        order_text = f"Student book: {student_count}, Workbook: {workbook_count}"
-    else:
-        count = state_data.get("count", 1)
-        order_text = f"{order_category}: {count}"
+    count = state_data.get("count")
     school = state_data.get("school")
     if not school:
         user_info = await database.get_user(user_id)
         if user_info:
             school = user_info[3]
     if data == "order:final_confirm:yes":
+        # После финального подтверждения отправляем сообщение об отправке заказа
         await callback_query.message.answer("Sizning buyurtmangiz adminga jo'natildi, javobni kuting.",
                                             reply_markup=ReplyKeyboardRemove())
+        # Формируем детали заказа с учётом роли: для рабочих и для учителей различается метка
         user_info = await database.get_user(user_id)
         name_field = "Foydalanuvchi" if user_id in config.WORKER_IDS else "O'qtuvchi"
         user_name = user_info[2] if user_info else "Noma'lum"
@@ -457,7 +327,8 @@ async def order_final_confirm_callback(callback_query: types.CallbackQuery, stat
         order_details = (
             f"Buyurtma:\n"
             f"{name_field}: {user_name} {user_phone}\n"
-            f"Kitoblar: {order_text}\n"
+            f"Kitob turi: {order_category}\n"
+            f"Soni: {count}\n"
             f"Maktab: {school}"
         )
         admin_kb = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -499,8 +370,5 @@ async def admin_delivery_info(message: types.Message):
     if admin_id in admin_pending_orders:
         teacher_id = admin_pending_orders.pop(admin_id)
         delivery_info = message.text
-        await message.bot.send_message(teacher_id, f"Buyurtmangiz haqida ma'lumot: \n"
-                                                   f"{delivery_info}\n"
-                                                   f"Admin bilan bog'lanish uchun quyidagi raqamlarga murojaat "
-                                                   f"qilishingiz mumkin:\n {config.ADMIN_PHONE}",
+        await message.bot.send_message(teacher_id, f"Kitob yetkazib berilishi haqidagi ma'lumot: \n{delivery_info}",
                                        reply_markup=keyboards.teacher_menu_keyboard())
