@@ -32,13 +32,15 @@ async def start_command(message: types.Message, state: FSMContext):
     await state.clear()
     if await database.user_exists(user_id):
         if user_id in config.WORKER_IDS:
-            await message.answer("Siz allaqachon ro'yxatdan o'tgansiz.\nMenyu:",
+            await message.answer("Siz allaqachon ro'yxatdan o'tgansiz.\n:",
                                  reply_markup=keyboards.worker_menu_keyboard())
+        elif user_id == config.ADMIN_ID:
+            await message.answer("Xush kelibsiz admin. Siz ro'yxatdan o'tgansiz.", reply_markup=ReplyKeyboardRemove())
         else:
             await message.answer("Siz allaqachon ro'yxatdan o'tgansiz.\nMenyu:",
                                  reply_markup=keyboards.teacher_menu_keyboard())
         return
-    await state.set_state(Registration.waiting_for_contact)
+    await state.set_state(Registration.waiting_for_contact) 
     await message.answer("Assalomu alaykum botga xush kelibsiz!\nTelefon raqamingizni yuboring",
                          reply_markup=keyboards.contact_keyboard())
 
@@ -100,7 +102,7 @@ class UpdateTeacherInfo(StatesGroup):
 @router.message(lambda message: message.text == "Ma'lumotlarni o'zgartirish")
 async def update_info_start(message: types.Message, state: FSMContext):
     await state.set_state(UpdateTeacherInfo.waiting_for_new_name)
-    await message.answer("Yangi ismingizni kiriting:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Ismingizni qaytatdan kiriting:", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(UpdateTeacherInfo.waiting_for_new_name)
@@ -108,7 +110,7 @@ async def update_info_name(message: types.Message, state: FSMContext):
     new_name = message.text
     await state.update_data(new_name=new_name)
     await state.set_state(UpdateTeacherInfo.waiting_for_new_school)
-    await message.answer("Yangi maktabingizni kiriting:")
+    await message.answer("Maktabingizni qaytatdan kiriting:")
 
 
 @router.message(UpdateTeacherInfo.waiting_for_new_school)
@@ -124,7 +126,7 @@ async def update_info_school(message: types.Message, state: FSMContext):
 
 @router.message(lambda message: message.text == "Biz bilan bog'lanish")
 async def contact_admin_handler(message: types.Message):
-    await message.answer(f"Admin bilan bog'lanish uchun: {config.ADMIN_PHONE}")
+    await message.answer(f"Admin bilan bog'lanish uchun quyidagi raqamlarga murojaat qiling: \n{config.ADMIN_PHONE}")
 
 
 # ============================================================================
@@ -146,7 +148,6 @@ class OrderBook(StatesGroup):
 # Заказ для учителей
 @router.message(lambda message: message.text == "Kitobga buyurtma berish")
 async def teacher_order_book_start(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
     await state.set_state(OrderBook.waiting_for_category)
     reply_keyboard = ReplyKeyboardMarkup(
         keyboard=[
@@ -235,7 +236,7 @@ async def order_count_callback(callback_query: types.CallbackQuery, state: FSMCo
         count = state_data.get("count", 1)
         confirm_kb = keyboards.order_confirm_keyboard()
         await callback_query.message.answer(
-            f"Siz bizning {state_data.get('order_category', 'kitob')} imizdan {count} buyurtma bermoqchimisiz?",
+            f"Siz bizning {state_data.get('order_category', 'kitob')} imizdan {count} dona buyurtma bermoqchimisiz?",
             reply_markup=confirm_kb
         )
         await callback_query.answer()
@@ -254,7 +255,7 @@ async def order_count_confirm_callback(callback_query: types.CallbackQuery, stat
             await state.set_state(OrderBook.waiting_for_school_confirm)
             school_confirm_kb = keyboards.school_confirm_keyboard()
             await callback_query.message.answer(
-                f"Sizning ro'yxatdan o'tgan maktabingiz: {school}. Shu maktabga buyurtmani jo'natish kerakmi?",
+                f"Sizning ro'yxatdan o'tgan maktab: {school}. Shu maktabga buyurtmani jo'natish kerakmi?",
                 reply_markup=school_confirm_kb
             )
         else:
@@ -448,7 +449,8 @@ async def order_final_confirm_callback(callback_query: types.CallbackQuery, stat
         if user_info:
             school = user_info[3]
     if data == "order:final_confirm:yes":
-        await callback_query.message.answer("Sizning buyurtmangiz adminga jo'natildi, javobni kuting.",
+        await callback_query.message.answer("Sizning buyurtmangiz haqidagi ma'lumot adminga jo'natildi, "
+                                            "javobni kuting.",
                                             reply_markup=ReplyKeyboardRemove())
         user_info = await database.get_user(user_id)
         name_field = "Foydalanuvchi" if user_id in config.WORKER_IDS else "O'qtuvchi"
